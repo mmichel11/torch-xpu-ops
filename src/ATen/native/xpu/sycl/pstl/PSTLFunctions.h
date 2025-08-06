@@ -17,6 +17,15 @@
 #include <cstdint>
 #include <functional>
 
+#define USE_ONEDPL
+
+#ifdef USE_ONEDPL
+#include <oneapi/dpl/execution>
+#include <oneapi/dpl/algorithm> // sort, unique
+#include <oneapi/dpl/numeric> // adjacent_difference
+#include <oneapi/dpl/iterator>
+#endif
+
 namespace at::native::xpu::pstl {
 
 using namespace at::xpu;
@@ -794,11 +803,18 @@ struct SimpleCopyKernelFunctor {
 };
 
 template <typename T, typename index_t, class ForwardIt, class BinaryPredicate>
+class onedpl_unique;
+
+template <typename T, typename index_t, class ForwardIt, class BinaryPredicate>
 ForwardIt unique(ForwardIt first, ForwardIt last, BinaryPredicate p) {
   RECORD_FUNCTION("unique_kernel_xpu", {});
   const auto N = std::distance(first, last);
   auto& q = getCurrentSYCLQueue();
 
+#ifdef USE_ONEDPL
+  return oneapi::dpl::unique(oneapi::dpl::execution::make_device_policy<onedpl_unique<T, index_t, ForwardIt, BinaryPredicate>>(q),
+                             first, last, p);
+#else
   auto options = map_options<T>();
   auto index_options = map_options<index_t>();
 
@@ -830,6 +846,7 @@ ForwardIt unique(ForwardIt first, ForwardIt last, BinaryPredicate p) {
   sycl_kernel_submit(sycl::range<1>(M), q, kfn3);
 
   return first + M;
+#endif
 }
 
 template <
@@ -891,6 +908,14 @@ struct SimpleCopyWithZipKernelFunctor {
   T* scratchpad_ptr_;
   zT* z_scratchpad_ptr_;
 };
+template <
+    typename T,
+    typename zT,
+    typename index_t,
+    class ForwardIt,
+    class ZipForwardIt,
+    class BinaryPredicate>
+class onedpl_unique_by_key;
 
 template <
     typename T,
@@ -904,10 +929,21 @@ std::tuple<ForwardIt, ZipForwardIt> unique_with_zip(
     ForwardIt last,
     ZipForwardIt z_first,
     BinaryPredicate p) {
+#if 0 //def USE_ONEDPL
   RECORD_FUNCTION("unique_with_zip_xpu", {});
   const auto N = std::distance(first, last);
   auto& q = getCurrentSYCLQueue();
 
+  auto ret_val = oneapi::dpl::unique(
+      oneapi::dpl::execution::make_device_policy<T, zT, index_t, ForwardIt, ZipForwardIt, BinaryPredicate>(q),
+      oneapi::dpl::make_zip_iterator(first, last),
+      oneapi::dpl::make_zip_iterator(
+          keys_last, values_first + std::distance(keys_first, keys_last)),
+      compare_key_fun<BinaryPred>(binary_pred));
+  auto n1 = std::distance(
+      oneapi::dpl::make_zip_iterator(keys_first, values_first), ret_val);
+  return std::make_pair(keys_first + n1, values_first + n1);
+#else
   auto options = map_options<T>();
   auto z_options = map_options<zT>();
   auto index_options = map_options<index_t>();
@@ -955,6 +991,7 @@ std::tuple<ForwardIt, ZipForwardIt> unique_with_zip(
   sycl_kernel_submit(sycl::range<1>(M), q, kfn3);
 
   return std::make_tuple<ForwardIt, ZipForwardIt>(first + M, z_first + M);
+#endif
 }
 
 template <
@@ -982,6 +1019,13 @@ struct AdjacentDifferenceKernelFunctor {
   OutputIt adiff_;
 };
 
+#ifdef USE_ONEDPL
+template <typename output_t, typename InputIt, typename OutputIt, typename BinaryOperation>
+class onedpl_adj_diff;
+template <typename output_t, typename InputIt, typename OutputIt, typename BinaryOperation>
+class onedpl_adj_diff_writeback;
+#endif
+
 template <
     typename output_t,
     class InputIt,
@@ -1004,13 +1048,25 @@ OutputIt adjacent_difference(
     adiff = scratchpad.data_ptr<output_t>();
   }
 
+#ifdef USE_ONEDPL
+  using adj_diff_t = onedpl_adj_diff<output_t, InputIt, OutputIt, BinaryOperation>;
+  oneapi::dpl::adjacent_difference(oneapi::dpl::execution::make_device_policy<adj_diff_t>(q),
+                                   first, first + N, adiff, op);
+#else
   AdjacentDifferenceKernelFunctor<output_t, InputIt, OutputIt, BinaryOperation>
       kfn1(first, op, adiff);
   sycl_kernel_submit(sycl::range<1>(N), q, kfn1);
+#endif
 
   if (is_inplace) {
+#ifdef USE_ONEDPL
+  using adj_diff_writeback_t = onedpl_adj_diff_writeback<output_t, InputIt, OutputIt, BinaryOperation>;
+    oneapi::dpl::copy_n(oneapi::dpl::execution::make_device_policy<adj_diff_writeback_t>(q),
+                        adiff, N, d_first);
+#else
     SimpleCopyKernelFunctor<output_t, OutputIt> kfn2(d_first, adiff);
     sycl_kernel_submit(sycl::range<1>(N), q, kfn2);
+#endif
   }
 
   return d_first + N;
@@ -1682,6 +1738,12 @@ void merge_sort(
 // out_val: indices of sort, it is initialized by [0, 1, 2, ...]
 // sort_sz: element number to be sorted
 // descending: True for descending, False for ascending.
+#ifdef USE_ONEDPL
+template <typename KeyType, typename ValueType, typename CompFunc>
+class onedpl_sort;
+template <typename KeyType, typename ValueType, typename CompFunc>
+class onedpl_sort_by_key;
+#endif
 template <typename KeyType, typename ValueType, typename CompFunc>
 void sort(
     KeyType* out_key,
@@ -1689,7 +1751,24 @@ void sort(
     const int64_t sort_sz,
     const CompFunc comp_t) {
   RECORD_FUNCTION("pstl::sort", {});
+#ifdef USE_ONEDPL
+  // Implementation will use radix sort if possible. Otherwise, merge sort.
+  auto& q = getCurrentSYCLQueue();
+  if (out_val == nullptr)
+  {
+    using sort_kernel_t = onedpl_sort<KeyType, ValueType, CompFunc>;
+    oneapi::dpl::stable_sort(oneapi::dpl::execution::make_device_policy<sort_kernel_t>(q),
+                             out_key, out_key + sort_sz, comp_t);
+  }
+  else
+  {
+    using sort_by_key_kernel_t = onedpl_sort_by_key<KeyType, ValueType, CompFunc>;
+    oneapi::dpl::stable_sort_by_key(oneapi::dpl::execution::make_device_policy<sort_by_key_kernel_t>(q),
+                                    out_key, out_key + sort_sz, out_val, comp_t);
+  }
+#else
   merge_sort<KeyType, ValueType>(out_key, out_val, sort_sz, comp_t);
+#endif
 }
 
 template <typename KeyType, typename ValueType>
