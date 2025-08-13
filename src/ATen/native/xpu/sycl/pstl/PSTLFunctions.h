@@ -929,21 +929,9 @@ std::tuple<ForwardIt, ZipForwardIt> unique_with_zip(
     ForwardIt last,
     ZipForwardIt z_first,
     BinaryPredicate p) {
-#if 0 //def USE_ONEDPL
   RECORD_FUNCTION("unique_with_zip_xpu", {});
-  const auto N = std::distance(first, last);
   auto& q = getCurrentSYCLQueue();
-
-  auto ret_val = oneapi::dpl::unique(
-      oneapi::dpl::execution::make_device_policy<T, zT, index_t, ForwardIt, ZipForwardIt, BinaryPredicate>(q),
-      oneapi::dpl::make_zip_iterator(first, last),
-      oneapi::dpl::make_zip_iterator(
-          keys_last, values_first + std::distance(keys_first, keys_last)),
-      compare_key_fun<BinaryPred>(binary_pred));
-  auto n1 = std::distance(
-      oneapi::dpl::make_zip_iterator(keys_first, values_first), ret_val);
-  return std::make_pair(keys_first + n1, values_first + n1);
-#else
+  const auto N = std::distance(first, last);
   auto options = map_options<T>();
   auto z_options = map_options<zT>();
   auto index_options = map_options<index_t>();
@@ -991,7 +979,6 @@ std::tuple<ForwardIt, ZipForwardIt> unique_with_zip(
   sycl_kernel_submit(sycl::range<1>(M), q, kfn3);
 
   return std::make_tuple<ForwardIt, ZipForwardIt>(first + M, z_first + M);
-#endif
 }
 
 template <
