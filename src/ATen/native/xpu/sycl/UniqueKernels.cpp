@@ -3,6 +3,10 @@
 #include <ATen/native/xpu/sycl/pstl/PSTLFunctions.h>
 #include <comm/SYCLContext.h>
 
+#ifdef USE_ONEDPL
+#   include <functional>
+#endif
+
 #include <ATen/native/xpu/sycl/UniqueKernels.h>
 
 namespace at::native::xpu {
@@ -80,7 +84,11 @@ Tensor compute_inverse(
         /*dim*/ 0,
         (index_t)(0.0),
         std::plus<index_t>());
+#ifdef USE_ONEDPL
+    std::less<index_t> f;
+#else
     ComputeInverseLTFunctor<index_t> f;
+#endif
     pstl::sort<index_t, index_t>(
         sorted_indices_ptr, inv_loc_ptr, sorted_indices.size(0), f);
     inverse_indices = inv_loc;
